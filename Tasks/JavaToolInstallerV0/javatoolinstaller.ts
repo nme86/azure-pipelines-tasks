@@ -27,6 +27,7 @@ async function getJava(versionSpec: string) {
     const cleanDestinationDirectory: boolean = taskLib.getBoolInput('cleanDestinationDirectory', false);
     let compressedFileExtension: string;
     let jdkDirectory: string;
+    let extractionDirectory: string;
     const extendedJavaHome: string = `JAVA_HOME_${versionSpec}_${taskLib.getInput('jdkArchitectureOption', true)}`;
 
     toolLib.debug('Trying to get tool from local cache first');
@@ -36,7 +37,6 @@ async function getJava(versionSpec: string) {
      // Clean the destination folder before downloading and extracting?
      if (cleanDestinationDirectory && taskLib.exist(extractLocation) && taskLib.stats(extractLocation).isDirectory) {
         console.log(taskLib.loc('CleanDestDir', extractLocation));
-
         // delete the contents of the destination directory but leave the directory in place
         fs.readdirSync(extractLocation)
         .forEach((item: string) => {
@@ -53,7 +53,7 @@ async function getJava(versionSpec: string) {
             throw new Error(taskLib.loc('JavaNotPreinstalled', versionSpec));
         }
         console.log(taskLib.loc('UsePreinstalledJava', preInstalledJavaDirectory));
-        jdkDirectory = preInstalledJavaDirectory;
+        jdkDirectory = JavaFilesExtractor.setJavaHome(preInstalledJavaDirectory, false);
     } else if (fromAzure) { //Download JDK from an Azure blob storage location and extract.
         console.log(taskLib.loc('RetrievingJdkFromAzure'));
         const fileNameAndPath: string = taskLib.getInput('azureCommonVirtualFile', false);
@@ -66,17 +66,26 @@ async function getJava(versionSpec: string) {
 
         const extractSource = buildFilePath(extractLocation, compressedFileExtension, fileNameAndPath);
         const javaFilesExtractor = new JavaFilesExtractor();
-        jdkDirectory = await javaFilesExtractor.unzipJavaDownload(extractSource, compressedFileExtension, extractLocation);
+        await javaFilesExtractor.unzipJavaDownload(extractSource, compressedFileExtension, extractLocation);
+        jdkDirectory = JavaFilesExtractor.setJavaHome(extractLocation);
     } else { //JDK is in a local directory. Extract to specified target directory.
         console.log(taskLib.loc('RetrievingJdkFromLocalPath'));
-        compressedFileExtension = getFileEnding(taskLib.getInput('jdkFile', true));
+        const jdkFileName = taskLib.getInput('jdkFile', true);
+        compressedFileExtension = getFileEnding(jdkFileName);
         const javaFilesExtractor = new JavaFilesExtractor();
-        jdkDirectory = await javaFilesExtractor.unzipJavaDownload(taskLib.getInput('jdkFile', true), compressedFileExtension, extractLocation);
+        const extractDirectoryName = `${extendedJavaHome}_${JavaFilesExtractor.getStrippedName(jdkFileName)}_${compressedFileExtension}`;
+        extractionDirectory = path.join(extractLocation, extractDirectoryName);
+        if (!cleanDestinationDirectory && taskLib.exist(extractionDirectory)){
+            // do nothing since the files were extracted and ready for using
+            console.log(taskLib.loc('ArchiveWasExtractedEarlier'));
+        } else {
+            // unpack files to specified directory
+            console.log(taskLib.loc('ExtractingArchiveToPath', extractionDirectory));
+            await javaFilesExtractor.unzipJavaDownload(jdkFileName, compressedFileExtension, extractionDirectory);
+        }
+        jdkDirectory = JavaFilesExtractor.setJavaHome(extractionDirectory);
     }
-
-    console.log(taskLib.loc('SetJavaHome', jdkDirectory));
     console.log(taskLib.loc('SetExtendedJavaHome', extendedJavaHome, jdkDirectory));
-    taskLib.setVariable('JAVA_HOME', jdkDirectory);
     taskLib.setVariable(extendedJavaHome, jdkDirectory);
     toolLib.prependPath(path.join(jdkDirectory, BIN_FOLDER));
 }
@@ -89,12 +98,10 @@ function sleepFor(sleepDurationInMillisecondsSeconds): Promise<any> {
 
 function buildFilePath(localPathRoot: string, fileEnding: string, fileNameAndPath: string): string {
     const fileName = fileNameAndPath.split(/[\\\/]/).pop();
-    const extractSource = path.join(localPathRoot, fileName);
-
-    return extractSource;
+    return path.join(localPathRoot, fileName);
 }
 
-function getFileEnding(file: string): string {
+export function getFileEnding(file: string): string {
     let fileEnding = '';
 
     if (file.endsWith('.tar')) {
